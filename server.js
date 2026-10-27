@@ -1,193 +1,33 @@
 'use strict';
-
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const crypto = require('crypto');
-
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: process.env.ALLOWED_ORIGIN || '*', methods: ['GET', 'POST'] },
-  pingInterval: 25000,
-  pingTimeout: 20000
-});
-
-const PORT = Number(process.env.PORT || 3000);
-const MAX_PLAYERS = 15;
-const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const rooms = new Map();
-const socketRoom = new Map();
-
-app.use(express.json({ limit: '16kb' }));
-app.use(express.static('public'));
-app.get('/health', (_req, res) => res.json({ ok: true, service: 'among-us-edicao-da-lenda-v4-alpha-online', rooms: rooms.size }));
-app.get('/api/rooms', (_req, res) => {
-  const list = [...rooms.values()]
-    .filter((room) => room.visibility === 'public' && room.status === 'lobby')
-    .map(publicRoomSummary);
-  res.json({ rooms: list });
-});
-
-function cleanName(value) {
-  if (typeof value !== 'string') return '';
-  return value.replace(/[<>\u0000-\u001F]/g, '').trim().slice(0, 18);
-}
-function makeCode() {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    let code = '';
-    for (let i = 0; i < 6; i++) code += CODE_CHARS[crypto.randomInt(CODE_CHARS.length)];
-    if (!rooms.has(code)) return code;
-  }
-  throw new Error('Não foi possível gerar um código de sala.');
-}
-function publicRoomSummary(room) {
-  return {
-    code: room.code,
-    name: room.name,
-    players: room.players.length,
-    maxPlayers: room.maxPlayers,
-    impostors: room.settings.impostors,
-    status: room.status
-  };
-}
-function roomSnapshot(room) {
-  return {
-    ...publicRoomSummary(room),
-    visibility: room.visibility,
-    hostId: room.hostId,
-    botsToAdd: room.settings.botsToAdd,
-    players: room.players.map((p) => ({ id: p.id, name: p.name, isBot: p.isBot, isHost: p.id === room.hostId, ready: !!p.ready })),
-    settings: { ...room.settings }
-  };
-}
-function emitRoom(room) {
-  io.to(room.code).emit('room:updated', roomSnapshot(room));
-  io.emit('rooms:updated', [...rooms.values()].filter(r => r.visibility === 'public' && r.status === 'lobby').map(publicRoomSummary));
-}
-function leaveCurrentRoom(socket, reason = 'left') {
-  const code = socketRoom.get(socket.id);
-  if (!code) return;
-  const room = rooms.get(code);
-  socketRoom.delete(socket.id);
-  socket.leave(code);
-  if (!room) return;
-  room.players = room.players.filter((p) => p.id !== socket.id);
-  if (room.players.length === 0) {
-    rooms.delete(code);
-    io.emit('rooms:updated', [...rooms.values()].filter(r => r.visibility === 'public' && r.status === 'lobby').map(publicRoomSummary));
-    return;
-  }
-  if (room.hostId === socket.id) {
-    const nextHost = room.players.find((p) => !p.isBot) || room.players[0];
-    room.hostId = nextHost.id;
-  }
-  emitRoom(room);
-  socket.to(code).emit('player:left', { name: 'Um jogador', reason });
-}
-
-io.on('connection', (socket) => {
-  socket.emit('rooms:list', [...rooms.values()].filter(r => r.visibility === 'public' && r.status === 'lobby').map(publicRoomSummary));
-
-  socket.on('room:create', (payload = {}, callback = () => {}) => {
-    if (socketRoom.has(socket.id)) return callback({ ok: false, error: 'Você já está em uma sala.' });
-    const name = cleanName(payload.playerName) || 'Jogador';
-    const roomName = cleanName(payload.roomName) || `Sala de ${name}`;
-    const visibility = payload.visibility === 'private' ? 'private' : 'public';
-    const impostors = Number(payload.impostors);
-    const botsToAdd = Number(payload.botsToAdd || 0);
-    const maxPlayers = Number(payload.maxPlayers || MAX_PLAYERS);
-    if (![1, 2, 3].includes(impostors)) return callback({ ok: false, error: 'Escolha de 1 a 3 impostores.' });
-    if (!Number.isInteger(botsToAdd) || botsToAdd < 0 || botsToAdd > MAX_PLAYERS - 1) return callback({ ok: false, error: 'Quantidade de bots inválida.' });
-    if (!Number.isInteger(maxPlayers) || maxPlayers < 2 || maxPlayers > MAX_PLAYERS) return callback({ ok: false, error: 'A sala deve ter de 2 a 15 vagas.' });
-    if (botsToAdd >= maxPlayers) return callback({ ok: false, error: 'Os bots não podem ocupar todas as vagas.' });
-    let code;
-    try { code = makeCode(); } catch (error) { return callback({ ok: false, error: error.message }); }
-    const room = {
-      code, name: roomName, visibility, hostId: socket.id, status: 'lobby', maxPlayers,
-      settings: { impostors, botsToAdd },
-      players: [{ id: socket.id, name, isBot: false, ready: true, joinedAt: Date.now() }],
-      createdAt: Date.now()
-    };
-    rooms.set(code, room);
-    socketRoom.set(socket.id, code);
-    socket.join(code);
-    emitRoom(room);
-    callback({ ok: true, room: roomSnapshot(room) });
-  });
-
-  socket.on('room:join', (payload = {}, callback = () => {}) => {
-    if (socketRoom.has(socket.id)) return callback({ ok: false, error: 'Saia da sala atual antes de entrar em outra.' });
-    const code = typeof payload.code === 'string' ? payload.code.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) : '';
-    const room = rooms.get(code);
-    if (!room) return callback({ ok: false, error: 'Sala não encontrada.' });
-    if (room.status !== 'lobby') return callback({ ok: false, error: 'A partida já começou.' });
-    if (room.visibility === 'private' && payload.invited !== true) return callback({ ok: false, error: 'Esta sala é privada. Use um convite válido.' });
-    if (room.players.length >= room.maxPlayers) return callback({ ok: false, error: 'A sala está cheia.' });
-    const name = cleanName(payload.playerName) || 'Jogador';
-    room.players.push({ id: socket.id, name, isBot: false, ready: false, joinedAt: Date.now() });
-    socketRoom.set(socket.id, code);
-    socket.join(code);
-    emitRoom(room);
-    callback({ ok: true, room: roomSnapshot(room) });
-  });
-
-  socket.on('room:join-private', (payload = {}, callback = () => {}) => {
-    const code = typeof payload.code === 'string' ? payload.code.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) : '';
-    const room = rooms.get(code);
-    if (!room || room.visibility !== 'private') return callback({ ok: false, error: 'Código privado inválido.' });
-    // O código de seis caracteres é o segredo de entrada da sala privada.
-    socket.emit('__private_join_attempt__', { code });
-    const name = cleanName(payload.playerName) || 'Jogador';
-    if (socketRoom.has(socket.id)) return callback({ ok: false, error: 'Saia da sala atual antes de entrar em outra.' });
-    if (room.status !== 'lobby') return callback({ ok: false, error: 'A partida já começou.' });
-    if (room.players.length >= room.maxPlayers) return callback({ ok: false, error: 'A sala está cheia.' });
-    room.players.push({ id: socket.id, name, isBot: false, ready: false, joinedAt: Date.now() });
-    socketRoom.set(socket.id, code);
-    socket.join(code);
-    emitRoom(room);
-    callback({ ok: true, room: roomSnapshot(room) });
-  });
-
-  socket.on('room:settings', (payload = {}, callback = () => {}) => {
-    const code = socketRoom.get(socket.id);
-    const room = rooms.get(code);
-    if (!room) return callback({ ok: false, error: 'Você não está em uma sala.' });
-    if (room.hostId !== socket.id) return callback({ ok: false, error: 'Somente o anfitrião pode alterar as configurações.' });
-    const impostors = Number(payload.impostors ?? room.settings.impostors);
-    const botsToAdd = Number(payload.botsToAdd ?? room.settings.botsToAdd);
-    if (![1, 2, 3].includes(impostors)) return callback({ ok: false, error: 'Escolha de 1 a 3 impostores.' });
-    if (!Number.isInteger(botsToAdd) || botsToAdd < 0 || botsToAdd > room.maxPlayers - room.players.length) return callback({ ok: false, error: 'Quantidade de bots inválida para as vagas restantes.' });
-    room.settings = { impostors, botsToAdd };
-    emitRoom(room);
-    callback({ ok: true, room: roomSnapshot(room) });
-  });
-
-  socket.on('room:start', (_payload = {}, callback = () => {}) => {
-    const code = socketRoom.get(socket.id);
-    const room = rooms.get(code);
-    if (!room) return callback({ ok: false, error: 'Você não está em uma sala.' });
-    if (room.hostId !== socket.id) return callback({ ok: false, error: 'Somente o anfitrião pode iniciar.' });
-    if (room.status !== 'lobby') return callback({ ok: false, error: 'A partida já foi iniciada.' });
-    const botCount = Math.min(room.settings.botsToAdd, room.maxPlayers - room.players.length);
-    for (let i = 0; i < botCount; i++) {
-      room.players.push({ id: `bot-${crypto.randomUUID()}`, name: `Bot ${i + 1}`, isBot: true, ready: true, joinedAt: Date.now() });
-    }
-    if (room.players.length < 2) return callback({ ok: false, error: 'São necessários pelo menos 2 participantes para iniciar.' });
-    if (room.settings.impostors >= room.players.length) return callback({ ok: false, error: 'É necessário ter mais tripulantes do que impostores.' });
-    room.status = 'starting';
-    emitRoom(room);
-    io.to(code).emit('match:starting', { room: roomSnapshot(room), message: 'Sala pronta. A lógica completa da partida será adicionada na próxima etapa.' });
-    callback({ ok: true, room: roomSnapshot(room) });
-  });
-
-  socket.on('room:leave', (_payload = {}, callback = () => {}) => {
-    leaveCurrentRoom(socket, 'left');
-    callback({ ok: true });
-  });
-  socket.on('disconnect', () => leaveCurrentRoom(socket, 'disconnect'));
-});
-
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`V4 Alpha Online server listening on port ${PORT}`);
-});
+const express=require('express');const http=require('http');const {Server}=require('socket.io');const crypto=require('crypto');
+const app=express(),server=http.createServer(app),io=new Server(server,{cors:{origin:process.env.ALLOWED_ORIGIN||'*'},pingInterval:25000,pingTimeout:20000});
+const PORT=Number(process.env.PORT||3000),MAX_PLAYERS=15,CODE_CHARS='ABCDEFGHJKLMNPQRSTUVWXYZ23456789',rooms=new Map(),socketRoom=new Map();
+app.use(express.json({limit:'16kb'}));app.use(express.static('public'));app.get('/health',(_q,r)=>r.json({ok:true,service:'among-us-edicao-da-lenda-v4-alpha-online',rooms:rooms.size}));app.get('/api/rooms',(_q,r)=>r.json({rooms:[...rooms.values()].filter(x=>x.visibility==='public'&&x.status==='lobby').map(summary)}));
+const TASK_POINTS={wires:{x:150,y:130},terminal:{x:370,y:115},radar:{x:680,y:120},files:{x:370,y:270},fuel:{x:150,y:420},scan:{x:650,y:420},engine:{x:90,y:270},oxygen:{x:500,y:440},comms:{x:500,y:120},charts:{x:700,y:260}};
+const TASKS=[{id:'wires',name:'Organizar os cabos de energia',kind:'wires',room:'Elétrica',steps:3},{id:'terminal',name:'Reiniciar o terminal',kind:'tap',room:'Administração',steps:3},{id:'radar',name:'Calibrar o radar',kind:'sequence',room:'Navegação',steps:3},{id:'files',name:'Apagar arquivos corrompidos',kind:'tap',room:'Administração',steps:5},{id:'fuel',name:'Transportar combustível especial',kind:'fuel',room:'Armazenamento',steps:3},{id:'scan',name:'Enviar dados de pesquisa',kind:'tap',room:'Laboratório',steps:3},{id:'engine',name:'Alinhar motor',kind:'sequence',room:'Motor',steps:3},{id:'oxygen',name:'Filtrar oxigênio',kind:'tap',room:'O2',steps:3},{id:'comms',name:'Reparar comunicação',kind:'wires',room:'Comunicações',steps:3},{id:'charts',name:'Traçar rota',kind:'sequence',room:'Navegação',steps:3}];
+function clean(s){return typeof s==='string'?s.replace(/[<>\u0000-\u001f]/g,'').trim().slice(0,18):''}function code(){for(let i=0;i<100;i++){let c='';for(let j=0;j<6;j++)c+=CODE_CHARS[crypto.randomInt(CODE_CHARS.length)];if(!rooms.has(c))return c}throw Error('Sem códigos disponíveis')}
+function summary(r){return{code:r.code,name:r.name,players:r.players.length,maxPlayers:r.maxPlayers,impostors:r.settings.impostors,status:r.status}}
+function pubPlayer(p,viewer){return{id:p.id,name:p.name,isBot:p.isBot,isHost:p.id===viewer.hostId,alive:p.alive,ready:p.ready,x:p.x,y:p.y,color:p.color,role:p.id===viewer.hostId&&viewer.revealRoles?p.role:undefined,roleVisible:viewer.revealRoles||p.id===viewer.selfId}}
+function snapshot(r,viewerId){const viewer=r.players.find(p=>p.id===viewerId);return{...summary(r),visibility:r.visibility,hostId:r.hostId,settings:{...r.settings},players:r.players.map(p=>({id:p.id,name:p.name,isBot:p.isBot,isHost:p.id===r.hostId,alive:p.alive,ready:p.ready,x:p.x,y:p.y,color:p.color,role:(p.id===viewerId||r.revealRoles)?p.role:undefined})),game:r.status==='playing'?{phase:r.phase,taskProgress:r.taskProgress,taskTotal:r.taskTotal,sabotage:r.sabotage,meeting:r.meeting?{endsAt:r.meeting.endsAt,reason:r.meeting.reason,votes:Object.keys(r.meeting.votes).length}:null,body:r.body}:null,you:viewer?{id:viewer.id,role:viewer.role,alive:viewer.alive,tasks:viewer.tasks,taskDone:viewer.taskDone,cooldown:Math.max(0,(viewer.killReadyAt||0)-Date.now()),color:viewer.color}:null}}
+function emitRoom(r){for(const p of r.players){if(!p.isBot)io.to(p.id).emit('room:updated',snapshot(r,p.id))}io.emit('rooms:updated',[...rooms.values()].filter(x=>x.visibility==='public'&&x.status==='lobby').map(summary))}
+function getRoom(socket){return rooms.get(socketRoom.get(socket.id))}
+function leave(socket){const c=socketRoom.get(socket.id);if(!c)return;socketRoom.delete(socket.id);socket.leave(c);const r=rooms.get(c);if(!r)return;r.players=r.players.filter(p=>p.id!==socket.id);if(!r.players.length){rooms.delete(c)}else{if(r.hostId===socket.id)r.hostId=(r.players.find(p=>!p.isBot)||r.players[0]).id;emitRoom(r)}}
+function sendState(r){emitRoom(r);for(const p of r.players)if(!p.isBot)io.to(p.id).emit('game:state',snapshot(r,p.id))}
+function randomTaskSet(){return [...TASKS].sort(()=>Math.random()-.5).slice(0,5).map(t=>({...t,progress:0,complete:false}))}
+function addBots(r,n){for(let i=0;i<n&&r.players.length<r.maxPlayers;i++)r.players.push({id:'bot-'+crypto.randomUUID(),name:`Bot ${i+1}`,isBot:true,ready:true,alive:true,x:120+Math.random()*500,y:120+Math.random()*300,color:i%12,tasks:randomTaskSet(),taskDone:0,role:'crew',lastBotAction:Date.now()})}
+function startGame(r){const alive=[...r.players];let impostors=r.settings.impostors;if(impostors>=alive.length)throw Error('É necessário ter mais tripulantes do que impostores.');for(const p of alive){p.alive=true;p.x=110+Math.random()*600;p.y=100+Math.random()*380;p.taskDone=0;p.tasks=randomTaskSet();p.killReadyAt=0;p.role='crew'}const chosen=[...alive].sort(()=>Math.random()-.5).slice(0,impostors);chosen.forEach(p=>p.role='impostor');r.status='playing';r.phase='playing';r.revealRoles=false;r.taskProgress=0;r.taskTotal=alive.filter(p=>p.role==='crew').reduce((n,p)=>n+p.tasks.length,0);r.sabotage=null;r.meeting=null;r.body=null;r.lastKillAt=0;}
+function winCheck(r){const crew=r.players.filter(p=>p.alive&&p.role==='crew'),imps=r.players.filter(p=>p.alive&&p.role==='impostor');if(!imps.length){r.status='ended';r.winner='crew';r.endReason='Todos os impostores foram expulsos!'}else if(imps.length>=crew.length){r.status='ended';r.winner='impostor';r.endReason='Os impostores dominaram a nave!'}else if(r.taskTotal>0&&r.taskProgress>=r.taskTotal){r.status='ended';r.winner='crew';r.endReason='Todas as tarefas foram concluídas!'}if(r.status==='ended'){r.revealRoles=true;io.to(r.code).emit('game:ended',{winner:r.winner,message:r.endReason,room:snapshot(r,r.hostId)});sendState(r);return true}return false}
+function nearest(a,b,dist=65){return Math.hypot(a.x-b.x,a.y-b.y)<=dist}
+function runBots(r){if(r.status!=='playing'||r.meeting)return;const now=Date.now();for(const b of r.players.filter(p=>p.isBot&&p.alive)){if(now-b.lastBotAction<1800)continue;b.lastBotAction=now;const target=r.players.filter(p=>!p.isBot&&p.alive&&p.id!==b.id).sort((a,c)=>Math.hypot(a.x-b.x,a.y-b.y)-Math.hypot(c.x-b.x,c.y-b.y))[0];if(b.role==='impostor'&&target&&nearest(b,target,45)&&now>=b.killReadyAt){target.alive=false;r.body={x:target.x,y:target.y,name:target.name};b.killReadyAt=now+18000;io.to(r.code).emit('game:notice',{message:`Um participante foi eliminado perto de ${target.name}.`})}else{b.x=Math.max(50,Math.min(760,b.x+(Math.random()-.5)*70));b.y=Math.max(60,Math.min(520,b.y+(Math.random()-.5)*70));if(b.role==='crew'&&b.tasks.some(t=>!t.complete)&&Math.random()<.22){const t=b.tasks.find(t=>!t.complete);t.progress++;if(t.progress>=t.steps){t.complete=true;b.taskDone++;r.taskProgress++}}}}winCheck(r);sendState(r)}setInterval(()=>{for(const r of rooms.values())if(r.status==='playing')runBots(r)},900);
+io.on('connection',s=>{s.emit('rooms:list',[...rooms.values()].filter(r=>r.visibility==='public'&&r.status==='lobby').map(summary));s.on('room:create',(d={},cb=()=>{})=>{if(socketRoom.has(s.id))return cb({ok:false,error:'Você já está em uma sala.'});const name=clean(d.playerName)||'Jogador',visibility=d.visibility==='private'?'private':'public',imp=Number(d.impostors||1),bots=Number(d.botsToAdd||0),max=Number(d.maxPlayers||15);if(![1,2,3].includes(imp)||!Number.isInteger(bots)||bots<0||bots>14||!Number.isInteger(max)||max<2||max>15||bots>=max)return cb({ok:false,error:'Configurações inválidas.'});const c=code(),p={id:s.id,name,alive:true,ready:true,x:120,y:120,color:Math.floor(Math.random()*12),tasks:[],taskDone:0,role:'crew'};const r={code:c,name:clean(d.roomName)||`Sala de ${name}`,visibility,hostId:s.id,status:'lobby',maxPlayers:max,settings:{impostors:imp,botsToAdd:bots},players:[p],createdAt:Date.now(),phase:'lobby',taskProgress:0,taskTotal:0,sabotage:null,meeting:null,body:null};rooms.set(c,r);socketRoom.set(s.id,c);s.join(c);emitRoom(r);cb({ok:true,room:snapshot(r,s.id)})});
+s.on('room:join',(d={},cb=()=>{})=>join(s,d,cb,false));s.on('room:join-private',(d={},cb=()=>{})=>join(s,d,cb,true));function join(s,d,cb,privateEntry){if(socketRoom.has(s.id))return cb({ok:false,error:'Saia da sala atual antes de entrar em outra.'});const c=String(d.code||'').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,6),r=rooms.get(c);if(!r)return cb({ok:false,error:'Sala não encontrada.'});if(r.status!=='lobby')return cb({ok:false,error:'A partida já começou.'});if(r.visibility==='private'&&!privateEntry)return cb({ok:false,error:'Esta sala é privada. Use o código no campo de convite.'});if(r.players.length>=r.maxPlayers)return cb({ok:false,error:'A sala está cheia.'});r.players.push({id:s.id,name:clean(d.playerName)||'Jogador',alive:true,ready:false,x:120+Math.random()*100,y:120+Math.random()*100,color:Math.floor(Math.random()*12),tasks:[],taskDone:0,role:'crew'});socketRoom.set(s.id,c);s.join(c);emitRoom(r);cb({ok:true,room:snapshot(r,s.id)})}
+s.on('room:settings',(d={},cb=()=>{})=>{const r=getRoom(s);if(!r)return cb({ok:false,error:'Você não está em uma sala.'});if(r.hostId!==s.id)return cb({ok:false,error:'Só o anfitrião pode alterar configurações.'});const imp=Number(d.impostors??r.settings.impostors),bots=Number(d.botsToAdd??r.settings.botsToAdd);if(![1,2,3].includes(imp)||!Number.isInteger(bots)||bots<0||bots>r.maxPlayers-r.players.length)return cb({ok:false,error:'Configurações inválidas.'});r.settings={impostors:imp,botsToAdd:bots};emitRoom(r);cb({ok:true,room:snapshot(r,s.id)})});
+s.on('room:start',(_,cb=()=>{})=>{const r=getRoom(s);if(!r)return cb({ok:false,error:'Você não está em uma sala.'});if(r.hostId!==s.id)return cb({ok:false,error:'Somente o anfitrião pode iniciar.'});if(r.status!=='lobby')return cb({ok:false,error:'A partida já começou.'});addBots(r,r.settings.botsToAdd);if(r.players.length<2)return cb({ok:false,error:'Adicione ao menos um amigo ou bot para iniciar.'});try{startGame(r)}catch(e){return cb({ok:false,error:e.message})}sendState(r);io.to(r.code).emit('game:notice',{message:'A partida começou! Complete suas tarefas e descubra os impostores.'});cb({ok:true,room:snapshot(r,s.id)})});
+s.on('game:move',(d={})=>{const r=getRoom(s),p=r?.players.find(x=>x.id===s.id);if(!p||r.status!=='playing'||r.meeting||!p.alive)return;const dx=Math.max(-1,Math.min(1,Number(d.dx)||0)),dy=Math.max(-1,Math.min(1,Number(d.dy)||0));p.x=Math.max(38,Math.min(780,p.x+dx*7));p.y=Math.max(55,Math.min(535,p.y+dy*7));s.to(r.code).emit('game:positions',r.players.map(x=>({id:x.id,x:x.x,y:x.y,alive:x.alive,color:x.color,name:x.name})));});
+s.on('game:task',(d={},cb=()=>{})=>{const r=getRoom(s),p=r?.players.find(x=>x.id===s.id);if(!p||r.status!=='playing'||!p.alive||p.role!=='crew')return cb({ok:false,error:'Esta tarefa não está disponível.'});const t=p.tasks.find(x=>x.id===d.taskId&&!x.complete);if(!t)return cb({ok:false,error:'Tarefa inválida ou concluída.'});const point=TASK_POINTS[t.id];if(!point||Math.hypot(p.x-point.x,p.y-point.y)>90)return cb({ok:false,error:'Chegue mais perto do painel da tarefa.'});t.progress++;if(t.progress>=t.steps){t.complete=true;p.taskDone++;r.taskProgress++}sendState(r);winCheck(r);cb({ok:true,task:t,done:t.complete})});
+s.on('game:kill',(d={},cb=()=>{})=>{const r=getRoom(s),p=r?.players.find(x=>x.id===s.id),t=r?.players.find(x=>x.id===d.targetId);if(!p||!t||r.status!=='playing'||!p.alive||p.role!=='impostor'||!t.alive||t.role!=='crew')return cb({ok:false,error:'Ação indisponível.'});if(Date.now()<(p.killReadyAt||0))return cb({ok:false,error:'A habilidade ainda está em recarga.'});if(!nearest(p,t,62))return cb({ok:false,error:'Chegue mais perto do jogador.'});t.alive=false;r.body={x:t.x,y:t.y,name:t.name};p.killReadyAt=Date.now()+18000;io.to(r.code).emit('game:notice',{message:'Um corpo foi encontrado na nave.'});sendState(r);winCheck(r);cb({ok:true})});
+s.on('game:report',(_,cb=()=>{})=>{const r=getRoom(s),p=r?.players.find(x=>x.id===s.id);if(!r||r.status!=='playing'||!p?.alive)return cb({ok:false,error:'Não é possível convocar reunião agora.'});r.meeting={reason:r.body?'Corpo reportado':'Reunião de emergência',votes:{},endsAt:Date.now()+45000};r.body=null;io.to(r.code).emit('meeting:started',{reason:r.meeting.reason,endsAt:r.meeting.endsAt,players:r.players.filter(x=>x.alive).map(x=>({id:x.id,name:x.name}))});sendState(r);cb({ok:true})});
+s.on('meeting:vote',(d={},cb=()=>{})=>{const r=getRoom(s),p=r?.players.find(x=>x.id===s.id);if(!r?.meeting||!p?.alive)return cb({ok:false,error:'Não há reunião ativa.'});const target=String(d.targetId||'skip');if(target!=='skip'&&!r.players.some(x=>x.id===target&&x.alive))return cb({ok:false,error:'Voto inválido.'});r.meeting.votes[s.id]=target;const voters=r.players.filter(x=>x.alive&&!x.isBot);if(voters.every(x=>r.meeting.votes[x.id]))resolveVote(r);else sendState(r);cb({ok:true})});
+s.on('game:sabotage',(d={},cb=()=>{})=>{const r=getRoom(s),p=r?.players.find(x=>x.id===s.id);if(!p||r.status!=='playing'||!p.alive||p.role!=='impostor')return cb({ok:false,error:'Somente impostores podem sabotar.'});if(r.sabotage)return cb({ok:false,error:'Já existe uma sabotagem ativa.'});const types=['Sobrecarga de energia','Falha nas portas','Interferência no radar','Vazamento de oxigênio','Pane no sistema de comunicação'];r.sabotage=types.includes(d.type)?d.type:types[0];io.to(r.code).emit('game:notice',{message:`SABOTAGEM: ${r.sabotage}!`});sendState(r);cb({ok:true})});s.on('game:repair',(_,cb=()=>{})=>{const r=getRoom(s),p=r?.players.find(x=>x.id===s.id);if(!r?.sabotage||!p?.alive||p.role!=='crew')return cb({ok:false,error:'Não há sabotagem para reparar.'});r.sabotage=null;io.to(r.code).emit('game:notice',{message:'Sabotagem resolvida!'});sendState(r);cb({ok:true})});s.on('room:leave',(_,cb=()=>{})=>{leave(s);cb({ok:true})});s.on('disconnect',()=>leave(s));});
+function resolveVote(r){const m=r.meeting;if(!m)return;const counts={};Object.values(m.votes).forEach(v=>counts[v]=(counts[v]||0)+1);let top=0,winner=null,tie=false;for(const [id,n]of Object.entries(counts)){if(id==='skip')continue;if(n>top){top=n;winner=id;tie=false}else if(n===top)tie=true}if(tie||!winner||((counts.skip||0)>=top))winner=null;const ejected=winner?r.players.find(p=>p.id===winner):null;if(ejected)ejected.alive=false;r.meeting=null;r.phase='playing';io.to(r.code).emit('meeting:result',{ejected:ejected?{name:ejected.name,role:ejected.role}:null,message:ejected?`${ejected.name} foi expulso(a). Era ${ejected.role==='impostor'?'um impostor':'tripulante'}.`:'Votação empatada ou pulada. Ninguém foi expulso.'});sendState(r);winCheck(r)}
+server.listen(PORT,'0.0.0.0',()=>console.log(`V4 Alpha Online server listening on port ${PORT}`));
