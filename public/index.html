@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Among Us: Edição da Lenda — V4 Alpha Online</title>
+  <style>
+    :root{color-scheme:dark;font-family:system-ui,Arial,sans-serif;background:#10151f;color:#f4f7fb}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px;background:radial-gradient(circle at top,#253958,#10151f 65%)}main{width:min(720px,100%);background:#171f2d;border:1px solid #344258;border-radius:20px;padding:clamp(20px,4vw,36px);box-shadow:0 18px 60px #0005}h1{line-height:1.1;margin:0 0 8px}p{color:#c0ccdc;line-height:1.5}.tag{display:inline-block;background:#263a53;padding:6px 10px;border-radius:999px;font-size:.82rem;margin-bottom:14px}form,.rooms{display:grid;gap:12px;margin-top:18px}label{display:grid;gap:6px;color:#dce5f1}input,select,button{font:inherit;border-radius:10px;padding:12px;border:1px solid #455773;background:#0f1724;color:#fff;width:100%}button{cursor:pointer;background:#e8f1ff;color:#172235;font-weight:750;border:0}button.secondary{background:#29384d;color:#fff;border:1px solid #455773}.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}.status{padding:12px;border-radius:10px;background:#0f1724;white-space:pre-wrap;overflow-wrap:anywhere;margin-top:16px}.room{padding:14px;border:1px solid #344258;border-radius:12px;display:flex;align-items:center;justify-content:space-between;gap:12px}.room button{width:auto}.muted{font-size:.9rem;color:#aebbd0}@media(max-width:520px){.row{grid-template-columns:1fr}.room{align-items:stretch;flex-direction:column}.room button{width:100%}}
+  </style>
+</head>
+<body>
+<main>
+  <span class="tag">PROTÓTIPO DO SERVIDOR · V4 ALPHA ONLINE</span>
+  <h1>Among Us: Edição da Lenda</h1>
+  <p>Base inicial para testar criação de salas, códigos e conexão em tempo real. A partida completa ainda não está implementada.</p>
+  <form id="createForm">
+    <h2>Criar sala</h2>
+    <label>Seu nome <input id="playerName" maxlength="18" value="Lenda" required></label>
+    <label>Nome da sala <input id="roomName" maxlength="18" placeholder="Sala da Lenda"></label>
+    <div class="row">
+      <label>Tipo de sala<select id="visibility"><option value="public">Pública</option><option value="private">Privada</option></select></label>
+      <label>Impostores<select id="impostors"><option>1</option><option>2</option><option>3</option></select></label>
+    </div>
+    <div class="row">
+      <label>Vagas máximas<select id="maxPlayers"><option>15</option><option>10</option><option>8</option><option>6</option><option>4</option><option>2</option></select></label>
+      <label>Bots para adicionar ao iniciar<input id="botsToAdd" type="number" min="0" max="14" value="0"></label>
+    </div>
+    <button type="submit">Criar sala</button>
+  </form>
+  <form id="joinForm">
+    <h2>Entrar em sala</h2>
+    <label>Nome de jogador <input id="joinName" maxlength="18" value="Convidado"></label>
+    <label>Código de seis caracteres <input id="joinCode" maxlength="6" minlength="6" placeholder="ABC234" required></label>
+    <button type="submit" class="secondary">Entrar com código</button>
+  </form>
+  <section class="rooms"><h2>Salas públicas</h2><div id="roomList" class="muted">Carregando salas…</div></section>
+  <section id="currentRoom" hidden>
+    <h2>Sua sala</h2><div id="roomInfo" class="status"></div>
+    <div class="row"><button id="startBtn" type="button">Iniciar teste</button><button id="leaveBtn" type="button" class="secondary">Sair da sala</button></div>
+  </section>
+  <div id="status" class="status" role="status">Conectando ao servidor…</div>
+  <p class="muted">Protótipo técnico: bots são apenas espaços de participante nesta etapa; não têm IA. Não use para produção pública antes de adicionar autenticação, validação de convites e controles contra abuso.</p>
+</main>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+(() => {
+  const socket = io();
+  const $ = (id) => document.getElementById(id);
+  let current = null;
+  function status(message) { $('status').textContent = message; }
+  function showRoom(room) {
+    current = room;
+    $('currentRoom').hidden = !room;
+    if (!room) { $('roomInfo').textContent = ''; return; }
+    $('roomInfo').textContent = `Código: ${room.code}\nSala: ${room.name}\nTipo: ${room.visibility === 'private' ? 'Privada' : 'Pública'}\nParticipantes: ${room.players.length}/${room.maxPlayers}\nImpostores: ${room.settings.impostors}\nBots ao iniciar: ${room.settings.botsToAdd}\n\n` + room.players.map(p => `${p.name}${p.isHost ? ' (anfitrião)' : ''}${p.isBot ? ' [BOT]' : ''}`).join('\n');
+    $('startBtn').disabled = room.hostId !== socket.id || room.status !== 'lobby';
+  }
+  function renderRooms(rooms) {
+    const root = $('roomList'); root.replaceChildren();
+    if (!rooms.length) { root.textContent = 'Nenhuma sala pública disponível. Crie uma sala para começar!'; return; }
+    rooms.forEach(room => {
+      const item = document.createElement('div'); item.className = 'room';
+      const info = document.createElement('div');
+      const title = document.createElement('strong'); title.textContent = room.name;
+      const detail = document.createElement('div'); detail.className = 'muted'; detail.textContent = `${room.players}/${room.maxPlayers} jogadores · ${room.impostors} impostor(es)`;
+      info.append(title, detail);
+      const button = document.createElement('button'); button.textContent = 'Entrar'; button.addEventListener('click', () => joinRoom(room.code, $('playerName').value));
+      item.append(info, button); root.append(item);
+    });
+  }
+  function joinRoom(code, playerName) {
+    socket.emit('room:join', {code, playerName}, result => {
+      if (!result?.ok) return status(result?.error || 'Não foi possível entrar.');
+      showRoom(result.room); status('Você entrou na sala.');
+    });
+  }
+  socket.on('connect', () => status('Conectado ao servidor. Crie uma sala ou entre em uma sala pública.'));
+  socket.on('connect_error', () => status('Não foi possível conectar ao servidor. Confira se ele está iniciado.'));
+  socket.on('rooms:list', renderRooms); socket.on('rooms:updated', renderRooms);
+  socket.on('room:updated', showRoom);
+  socket.on('match:starting', ({message, room}) => { showRoom(room); status(message); });
+  socket.on('player:left', () => status('Um participante saiu da sala.'));
+  $('createForm').addEventListener('submit', e => {
+    e.preventDefault();
+    socket.emit('room:create', {playerName:$('playerName').value,roomName:$('roomName').value,visibility:$('visibility').value,impostors:Number($('impostors').value),maxPlayers:Number($('maxPlayers').value),botsToAdd:Number($('botsToAdd').value)}, result => {
+      if (!result?.ok) return status(result?.error || 'Falha ao criar sala.');
+      showRoom(result.room); status('Sala criada! Compartilhe o código com seus amigos.');
+    });
+  });
+  $('joinForm').addEventListener('submit', e => { e.preventDefault(); const code = $('joinCode').value.trim().toUpperCase(); if (code.length !== 6) return status('O código precisa ter seis caracteres.'); socket.emit('room:join-private', {code,playerName:$('joinName').value}, result => { if (!result?.ok) return status(result?.error || 'Falha ao entrar.'); showRoom(result.room); status('Entrou na sala com código.'); }); });
+  $('startBtn').addEventListener('click', () => socket.emit('room:start', {}, result => status(result?.ok ? 'Teste iniciado. A lógica da partida será adicionada em uma próxima etapa.' : (result?.error || 'Não foi possível iniciar.'))));
+  $('leaveBtn').addEventListener('click', () => socket.emit('room:leave', {}, result => { showRoom(null); status(result?.ok ? 'Você saiu da sala.' : 'Não foi possível sair.'); }));
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "name": "among-us-edicao-da-lenda-v4-alpha-online-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Servidor inicial de salas online para Among Us: Edição da Lenda V4 Alpha Online",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  }
+}

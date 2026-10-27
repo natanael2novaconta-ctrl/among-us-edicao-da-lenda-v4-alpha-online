@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: among-us-edicao-da-lenda-v4-alpha-online
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
