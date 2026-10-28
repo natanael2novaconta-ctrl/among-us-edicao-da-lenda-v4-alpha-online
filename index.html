@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<?xml encoding="UTF-8"><html lang="pt-BR">
+ <head>
+  <meta charset="utf-8">
+  <link href="images/f0bf593e1_logo.png" rel="icon" type="image/svg+xml">
+  <meta content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" name="viewport">
+  <meta content="#080b14" name="theme-color">
+  <meta content="Among Us: Edi&ccedil;&atilde;o da Lenda &mdash; V4 Alpha Online. Tripulantes, impostores, tarefas e sabotagens na nave The Skeld." name="description">
+  <link href="assets/manifest.json" rel="manifest">
+  <link href="https://fonts.googleapis.com" rel="preconnect">
+  <link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
+  <link href="css/css2.css" rel="stylesheet">
+  <title>
+   Among Us: Edi&ccedil;&atilde;o da Lenda &mdash; V4 Alpha Online
+  </title>
+  <script src="js/index-Bk5pI4bP.js" type="module">
+  </script>
+  <link href="css/index-BRAdfWCg.css" rel="stylesheet">
+  <script type="module">
+   if (window.self === window.top) {
+  let lastPath = "";
+  function getPageNameFromPath(path) {
+    const segments = path.split("/").filter(Boolean);
+    return segments[0] || null;
+  }
+  function trackPageView() {
+    const path = window.location.pathname;
+    if (path === lastPath) return;
+    lastPath = path;
+    const pageName = getPageNameFromPath(path) || "home";
+    const appId = "6ae23132b114972d7663c7ec";
+    if (!appId) return;
+    fetch(`/api/app-logs/${appId}/log-user-in-app/${pageName}`, {
+      method: "POST",
+    }).catch(() => {});
+  }
+  const originalPushState = history.pushState.bind(history);
+  history.pushState = function (...args) {
+    originalPushState(...args);
+    trackPageView();
+  };
+  const originalReplaceState = history.replaceState.bind(history);
+  history.replaceState = function (...args) {
+    originalReplaceState(...args);
+    trackPageView();
+  };
+  window.addEventListener("popstate", trackPageView);
+  trackPageView();
+}
+  </script>
+  <meta content="yes" name="mobile-web-app-capable">
+  <meta content="black" name="apple-mobile-web-app-status-bar-style">
+  <meta content="Among Us: Edi&ccedil;&atilde;o da Lenda" name="apple-mobile-web-app-title">
+  <script async="true" data-app-id="6ae23132b114972d7663c7ec" data-platform-url="https://app.base44.com" src="js/badge.js">
+  </script>
+ </head>
+ <body>
+  <div id="root">
+  </div>
+ </body>
+</html>
